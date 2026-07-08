@@ -1,30 +1,32 @@
 """
-app.py — локальный дашборд бакалаврской приёмной кампании ВШЭ.
+app.py — дашборд бакалаврской приёмной кампании ВШЭ. Задеплоен на Streamlit
+Community Cloud, данные читаются из приватной папки Google Drive через
+сервисный аккаунт (тот же, что и в магистратуре, summer_campaign_26/app.py —
+новая отдельная папка на Drive, доступ и ID папки в st.secrets). Репозиторий
+публичный, но данных абитуриентов в нём нет.
 
-Запуск: streamlit run app.py
+Запуск локально: streamlit run app.py (нужен .streamlit/secrets.toml, см.
+summer_campaign_26/docs/PIPELINE.md §7 — структура секретов та же).
 
-По образцу дашборда магистратуры (summer_campaign_26/app.py), но данные
-устроены иначе — три канала на программу (не budget/commercial):
+Данные устроены иначе, чем в магистратуре — три канала на программу (не
+budget/commercial):
   - budget_family — Бюджетные места + Отдельная квота + Особое право
     (схлопнуты до одного человека на программу, см. scripts/campaign_metrics_bak.py)
   - commercial — С оплатой обучения
   - target_quota — целевая квота (не сопоставима по приоритету с бюджетной
     семьёй, см. docs/METRICS.md — отдельная колонка, не отдельный "тип места")
-
-Данные читаются ЛОКАЛЬНО из data/ (Google Drive / Streamlit Cloud для
-бакалавриата пока не разворачивались — отдельный вопрос на будущее, см.
-summer_campaign_26/docs/CONTEXT_FOR_FUTURE.md, «Незакрытые темы»).
 """
 from __future__ import annotations
 
+import io
 import json
-from pathlib import Path
 
 import altair as alt
 import pandas as pd
 import streamlit as st
-
-DATA_DIR = Path(__file__).resolve().parent / "data"
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 # Цвет фона страницы — по референсу от заказчика (скриншот). Таблицы
 # (st.dataframe) рисуются на <canvas> и берут цвета ИЗ ТЕМЫ Streamlit
@@ -69,36 +71,112 @@ CHANNEL_LABELS = {
 
 
 # --------------------------------------------------------------------------
+# Google Drive — тот же механизм, что и в магистратуре (summer_campaign_26/app.py)
+# --------------------------------------------------------------------------
+
+@st.cache_resource
+def get_drive_service():
+    creds = service_account.Credentials.from_service_account_info(
+        dict(st.secrets["gdrive_service_account"]),
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+@st.cache_data(ttl=600)
+def list_drive_files() -> dict[str, str]:
+    """{имя файла: id файла} для всех файлов в папке (folder_id из secrets)."""
+    service = get_drive_service()
+    folder_id = st.secrets["gdrive_folder_id"]
+    files: dict[str, str] = {}
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="nextPageToken, files(id, name)",
+            pageToken=page_token,
+        ).execute()
+        for f in resp.get("files", []):
+            files[f["name"]] = f["id"]
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+
+@st.cache_data(ttl=600)
+def download_drive_file(file_id: str) -> bytes:
+    service = get_drive_service()
+    request = service.files().get_media(fileId=file_id)
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buf.getvalue()
+
+
+def read_drive_csv(name: str, **kwargs) -> pd.DataFrame:
+    files = list_drive_files()
+    return pd.read_csv(io.BytesIO(download_drive_file(files[name])), **kwargs)
+
+
+def read_drive_parquet(name: str) -> pd.DataFrame:
+    files = list_drive_files()
+    return pd.read_parquet(io.BytesIO(download_drive_file(files[name])))
+
+
+def check_password() -> bool:
+    """Тот же общий пароль на весь дашборд, что и в магистратуре — репозиторий
+    публичный (данных внутри нет), пароль не про защиту данных как таковых, а
+    про то, чтобы дашборд не открывался случайным прохожим."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    def on_submit():
+        if st.session_state.get("password_input") == st.secrets.get("app_password"):
+            st.session_state["authenticated"] = True
+        else:
+            st.session_state["authenticated"] = False
+
+    st.text_input("Пароль", type="password", key="password_input", on_change=on_submit)
+    if st.session_state.get("authenticated") is False:
+        st.error("Неверный пароль.")
+    return False
+
+
+# --------------------------------------------------------------------------
 # Загрузка данных
 # --------------------------------------------------------------------------
 
 @st.cache_data(ttl=600)
 def load_long_table() -> pd.DataFrame:
-    return pd.read_parquet(DATA_DIR / "bak_applications_long.parquet")
+    return read_drive_parquet("bak_applications_long.parquet")
 
 
 @st.cache_data(ttl=600)
 def load_budget_family() -> pd.DataFrame:
-    return pd.read_parquet(DATA_DIR / "bak_budget_family_collapsed.parquet")
+    return read_drive_parquet("bak_budget_family_collapsed.parquet")
 
 
 @st.cache_data(ttl=600)
 def load_metrics():
-    main = pd.read_csv(
-        DATA_DIR / "campaign_metrics_main_bak.csv",
+    main = read_drive_csv(
+        "campaign_metrics_main_bak.csv",
         dtype={
             "budget_places": "Int64", "special_right_places": "Int64",
             "separate_quota_places": "Int64", "target_quota_places": "Int64",
             "commercial_places": "Int64", "foreigner_places": "Int64",
         },
     )
-    ranked = pd.read_csv(DATA_DIR / "campaign_metrics_m4_desirability_ranked_bak.csv")
-    no_places = pd.read_csv(DATA_DIR / "campaign_metrics_no_budget_places_bak.csv")
-    meta = json.loads((DATA_DIR / "campaign_metrics_meta_bak.json").read_text(encoding="utf-8"))
-    priority_dist = pd.read_csv(DATA_DIR / "metric_priority_distribution_bak.csv")
-    m9 = pd.read_csv(DATA_DIR / "campaign_metrics_m9_diagnostic_bak.csv")
+    ranked = read_drive_csv("campaign_metrics_m4_desirability_ranked_bak.csv")
+    no_places = read_drive_csv("campaign_metrics_no_budget_places_bak.csv")
+    files = list_drive_files()
+    meta = json.loads(download_drive_file(files["campaign_metrics_meta_bak.json"]).decode("utf-8"))
+    priority_dist = read_drive_csv("metric_priority_distribution_bak.csv")
+    m9 = read_drive_csv("campaign_metrics_m9_diagnostic_bak.csv")
     intersections = {
-        ch: pd.read_csv(DATA_DIR / f"metric_program_intersections_bak_{ch}.csv", index_col=0)
+        ch: read_drive_csv(f"metric_program_intersections_bak_{ch}.csv", index_col=0)
         for ch in CHANNEL_LABELS
     }
     return main, ranked, no_places, meta, priority_dist, m9, intersections
@@ -171,6 +249,9 @@ def inject_theme():
 
 st.set_page_config(page_title="Приёмная кампания ВШЭ — бакалавриат", layout="wide")
 inject_theme()
+
+if not check_password():
+    st.stop()
 
 df = load_long_table()
 budget_family = load_budget_family()
@@ -418,7 +499,7 @@ with tab_program:
                 )
                 .properties(height=32 * len(chart_data) + 20)
             )
-            st.altair_chart(chart, width="stretch")
+            st.altair_chart(chart, use_container_width=True)
         else:
             st.info("Нет пересечений с другими программами по этому каналу.")
     else:
@@ -548,7 +629,7 @@ with tab_compare:
                 .properties(width=340, height=400)
                 .facet(column=alt.Column("Программа:N", title=None, sort=labels))
             )
-            st.altair_chart(profile_chart, width="stretch")
+            st.altair_chart(profile_chart, use_container_width=True)
         else:
             st.info(f"Нет заявок канала «{CHANNEL_LABELS[profile_channel]}» ни у одной из выбранных программ.")
 
