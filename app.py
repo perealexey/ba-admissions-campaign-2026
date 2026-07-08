@@ -1,0 +1,583 @@
+"""
+app.py — локальный дашборд бакалаврской приёмной кампании ВШЭ.
+
+Запуск: streamlit run app.py
+
+По образцу дашборда магистратуры (summer_campaign_26/app.py), но данные
+устроены иначе — три канала на программу (не budget/commercial):
+  - budget_family — Бюджетные места + Отдельная квота + Особое право
+    (схлопнуты до одного человека на программу, см. scripts/campaign_metrics_bak.py)
+  - commercial — С оплатой обучения
+  - target_quota — целевая квота (не сопоставима по приоритету с бюджетной
+    семьёй, см. docs/METRICS.md — отдельная колонка, не отдельный "тип места")
+
+Данные читаются ЛОКАЛЬНО из data/ (Google Drive / Streamlit Cloud для
+бакалавриата пока не разворачивались — отдельный вопрос на будущее, см.
+summer_campaign_26/docs/CONTEXT_FOR_FUTURE.md, «Незакрытые темы»).
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+DATA_DIR = Path(__file__).resolve().parent / "data"
+
+# Цвет фона страницы — по референсу от заказчика (скриншот). Таблицы
+# (st.dataframe) рисуются на <canvas> и берут цвета ИЗ ТЕМЫ Streamlit
+# (--theme.backgroundColor/secondaryBackgroundColor в launch.json), она же
+# governs и общий фон .stApp — то есть с одной темой нельзя одновременно
+# иметь "белое тело таблицы" и "синюю страницу" (одна и та же переменная).
+# Решение: theme.backgroundColor = белый (нужен таблицам), а видимый синий
+# фон САМОЙ СТРАНИЦЫ красится поверх через CSS — только `background-color`,
+# БЕЗ `height`/`min-height` на внутренних контейнерах Streamlit. Раньше
+# фон красился через CSS с принудительным height:100% на #root/
+# stAppViewContainer/stMain — это ломало внутреннюю flex/grid-раскладку
+# непредсказуемо по вьюпорту (растягивало по горизонтали/сжимало по
+# вертикали). Чистый `background-color` без `height` не трогает layout,
+# только paint — безопасно.
+PAGE_BACKGROUND_COLOR = "#2657EB"
+TEXT_ON_BACKGROUND = "#FFFFFF"
+
+# Приоритетные программы (звёздочка везде в списках) — очные программы
+# Москвы по направлениям Медиакоммуникации/Журналистика/Реклама/Кино/Актёр.
+# Решение пользователя (2026-07-08): онлайн-варианты ("Глобальные цифровые
+# коммуникации (онлайн)") в список НЕ включены, хотя формально закодированы
+# как очные — по названию это другой формат обучения. educationProgramId
+# используется как ключ (не имя) — среди совпадающих по направлению программ
+# есть настоящие «близнецы» (два разных id под именем «Реклама и связи с
+# общественностью», см. docs/FINDINGS.md).
+PRIORITY_PROGRAM_IDS = {
+    "a5aa2dd6-cbcf-11ec-b808-005056989556": "Актер",
+    "a5aa2da5-cbcf-11ec-b808-005056989556": "Журналистика",
+    "a5aa2dd7-cbcf-11ec-b808-005056989556": "Управление в креативных индустриях",
+    "a5aa2da6-cbcf-11ec-b808-005056989556": "Медиакоммуникации",
+    "a5aa2dd8-cbcf-11ec-b808-005056989556": "Кинопроизводство",
+    "9493b116-d0a3-11ee-b914-0050560b0254": "Реклама и связи с общественностью (Медиакоммуникации)",
+    "e0f65398-11db-11ef-9d83-0050560b40ed": "Реклама и связи с общественностью (Реклама и СО)",
+    "a5aa2da4-cbcf-11ec-b808-005056989556": "Стратегия и продюсирование в коммуникациях",
+}
+
+CHANNEL_LABELS = {
+    "budget_family": "Бюджет (+квоты)",
+    "commercial": "Платное",
+    "target_quota": "Целевая квота",
+}
+
+
+# --------------------------------------------------------------------------
+# Загрузка данных
+# --------------------------------------------------------------------------
+
+@st.cache_data(ttl=600)
+def load_long_table() -> pd.DataFrame:
+    return pd.read_parquet(DATA_DIR / "bak_applications_long.parquet")
+
+
+@st.cache_data(ttl=600)
+def load_budget_family() -> pd.DataFrame:
+    return pd.read_parquet(DATA_DIR / "bak_budget_family_collapsed.parquet")
+
+
+@st.cache_data(ttl=600)
+def load_metrics():
+    main = pd.read_csv(
+        DATA_DIR / "campaign_metrics_main_bak.csv",
+        dtype={
+            "budget_places": "Int64", "special_right_places": "Int64",
+            "separate_quota_places": "Int64", "target_quota_places": "Int64",
+            "commercial_places": "Int64", "foreigner_places": "Int64",
+        },
+    )
+    ranked = pd.read_csv(DATA_DIR / "campaign_metrics_m4_desirability_ranked_bak.csv")
+    no_places = pd.read_csv(DATA_DIR / "campaign_metrics_no_budget_places_bak.csv")
+    meta = json.loads((DATA_DIR / "campaign_metrics_meta_bak.json").read_text(encoding="utf-8"))
+    priority_dist = pd.read_csv(DATA_DIR / "metric_priority_distribution_bak.csv")
+    m9 = pd.read_csv(DATA_DIR / "campaign_metrics_m9_diagnostic_bak.csv")
+    intersections = {
+        ch: pd.read_csv(DATA_DIR / f"metric_program_intersections_bak_{ch}.csv", index_col=0)
+        for ch in CHANNEL_LABELS
+    }
+    return main, ranked, no_places, meta, priority_dist, m9, intersections
+
+
+# --------------------------------------------------------------------------
+# Хелперы
+# --------------------------------------------------------------------------
+
+def with_priority_first(ids: list[str], id_to_name: dict[str, str]) -> list[str]:
+    """Приоритетные программы — в начале списка, остальные по алфавиту."""
+    present_priority = [i for i in PRIORITY_PROGRAM_IDS if i in ids]
+    rest = sorted((set(ids) - set(present_priority)), key=lambda i: id_to_name.get(i, ""))
+    return present_priority + rest
+
+
+def star_label(pid: str, id_to_name: dict[str, str]) -> str:
+    name = id_to_name.get(pid, pid)
+    return f"⭐ {name}" if pid in PRIORITY_PROGRAM_IDS else name
+
+
+def channel_radio(label: str, key: str) -> str:
+    return st.radio(label, list(CHANNEL_LABELS), format_func=lambda x: CHANNEL_LABELS[x],
+                     horizontal=True, key=key)
+
+
+def inject_theme():
+    """Фон страницы красится тут ТОЛЬКО через background-color (без height/
+    min-height — см. комментарий у PAGE_BACKGROUND_COLOR, это принципиально:
+    чистый background-color не трогает layout/раскладку, только paint).
+    Таблицы (canvas, вне досягаемости CSS) — сплошной белый и шапка, и тело
+    (проверено пиксельно): secondaryBackgroundColor в этой версии Streamlit
+    (1.50.0) НЕ используется рендерером таблицы (glide-data-grid) для шапки
+    отдельно от тела — обе берут backgroundColor. Решение пользователя
+    (2026-07-08): оставить как есть (белый/белый), не тратить время на
+    обходные пути через pandas Styler (вероятно, тоже не сработает для шапки
+    в этом рендерере)."""
+    st.markdown(
+        f"""
+        <style>
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
+            background-color: {PAGE_BACKGROUND_COLOR};
+        }}
+        .stApp, .stApp p, .stApp span, .stApp label, .stMarkdown, h1, h2, h3 {{
+            color: {TEXT_ON_BACKGROUND};
+        }}
+        [data-testid="stHeader"] {{
+            background: transparent;
+        }}
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{
+            color: {TEXT_ON_BACKGROUND};
+        }}
+        div[data-baseweb="tab-list"] {{
+            gap: 4px;
+        }}
+        .block-container {{
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 12px;
+            padding: 2rem 2rem 3rem 2rem;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# Приложение
+# --------------------------------------------------------------------------
+
+st.set_page_config(page_title="Приёмная кампания ВШЭ — бакалавриат", layout="wide")
+inject_theme()
+
+df = load_long_table()
+budget_family = load_budget_family()
+main, ranked, no_places, meta, priority_dist, m9, intersections = load_metrics()
+
+# display_name != educationProgram для программ-«близнецов» (одно имя+филиал,
+# разные educationProgramId — см. docs/FINDINGS.md, 10 подтверждённых случаев,
+# например два «Реклама и связи с общественностью» под разными направлениями).
+# Используется везде в UI вместо голого имени — иначе близнецы неразличимы.
+id_to_name = dict(zip(main["educationProgramId"], main["display_name"]))
+# matrix_label — отдельная от display_name, ГЛОБАЛЬНО уникальная метка (не
+# только в пределах филиала) — нужна конкретно для intersections (M8): та
+# матрица не имеет отдельной колонки "Филиал", и одноимённые программы в
+# разных филиалах (например «Медиакоммуникации» в Москве и в СПб — обычная
+# ситуация, не близнецы) иначе дают дублирующийся индекс, matrix.loc[name]
+# вернёт DataFrame вместо Series, и .sort_values() падает с TypeError
+# (найдено на реальном использовании дашборда, 2026-07-09).
+id_to_matrix_label = dict(zip(main["educationProgramId"], main["matrix_label"]))
+snapshot_date_short = meta["snapshot_date"].replace("-", ".")
+
+st.title("Приёмная кампания ВШЭ — бакалавриат")
+st.caption(
+    f'<span style="font-size:18px;">Данные актуальны на момент {snapshot_date_short} · '
+    f'Программ: {meta["n_programs"]} · Порог «серьёзной» заявки: priority ≤ {meta["K_SERIOUS"]}</span>',
+    unsafe_allow_html=True,
+)
+
+st.info(
+    "**Три канала на программу, не два.** «Бюджет (+квоты)» — Бюджетные места + "
+    "Отдельная квота + Особое право, это одна и та же очередь абитуриентов "
+    "(человек не задваивается). «Целевая квота» — реальные бюджетные места, но "
+    "с другой аудиторией и своей нумерацией приоритетов — не входит в рейтинг "
+    "желанности (M4) и не суммируется с обычным бюджетом. Подробности — "
+    "`docs/METRICS.md`.",
+    icon="ℹ️",
+)
+
+all_ids = sorted(main["educationProgramId"].unique(), key=lambda i: id_to_name.get(i, ""))
+
+# ------------------------------------------------------------- Базовая статистика
+st.header("Базовая статистика")
+st.caption("Заявления по программам — как есть, без дополнительных расчётов.")
+
+default_basic = [i for i in PRIORITY_PROGRAM_IDS if i in all_ids]
+selected_basic = st.multiselect(
+    "Программы", options=with_priority_first(all_ids, id_to_name), default=default_basic,
+    format_func=lambda i: star_label(i, id_to_name), placeholder="Выберите программы",
+)
+
+basic_table = main[main["educationProgramId"].isin(selected_basic)][
+    ["display_name", "filial", "n_applications_budget_family", "n_applications_commercial",
+     "n_applications_target_quota"]
+].rename(columns={
+    "display_name": "Программа", "filial": "Филиал",
+    "n_applications_budget_family": "Заявок на бюджет (+квоты)",
+    "n_applications_commercial": "Заявок на платное",
+    "n_applications_target_quota": "Заявок на целевую квоту",
+})
+st.dataframe(basic_table, width="stretch", hide_index=True)
+
+st.divider()
+
+tab_program, tab_compare, tab_applicant = st.tabs(["По программе", "Сравнить программы", "По абитуриенту"])
+
+# ---------------------------------------------------------------- По программе
+with tab_program:
+    filials = sorted(main["filial"].unique())
+    selected_filials = st.multiselect("Филиал", filials, default=filials, placeholder="Выберите филиал")
+    filtered_main = main[main["filial"].isin(selected_filials)]
+
+    serious_label_budget = f"Приоритет 1–{meta['K_SERIOUS']} (бюджет)"
+    serious_label_commercial = f"Приоритет 1–{meta['K_SERIOUS']} (платное)"
+
+    st.subheader("Подробные метрики по программе")
+
+    detail_ids = sorted(filtered_main["educationProgramId"].unique(), key=lambda i: id_to_name.get(i, ""))
+    default_detail = [i for i in PRIORITY_PROGRAM_IDS if i in detail_ids]
+    selected_detail = st.multiselect(
+        "Программы", options=with_priority_first(detail_ids, id_to_name), default=default_detail,
+        format_func=lambda i: star_label(i, id_to_name), key="detail_programs", placeholder="Выберите программы",
+    )
+
+    with st.expander("Подробнее о метриках"):
+        st.markdown(
+            f"- **Уникальных абитуриентов** — сколько разных людей подали хотя бы одну "
+            f"заявку на программу (бюджет+квоты, платное и целевая квота вместе, без "
+            f"задвоения тех, кто подался несколькими способами).\n"
+            f"- **«{serious_label_budget}» / «{serious_label_commercial}»** — сколько "
+            f"заявителей поставили программу в число первых {meta['K_SERIOUS']} приоритетов "
+            f"(порог «серьёзности», для бакалавриата выше, чем в магистратуре — распределение "
+            f"приоритетов растянутее).\n"
+            f"- **Конкурс на место (бюджет)** — заявок на одно бюджетное место "
+            f"(Бюджетные места + Отдельная квота + Особое право вместе, без задвоения).\n"
+            f"- **Приоритетных заявителей на место** — заявителей с приоритетом "
+            f"1–{meta['K_SERIOUS']} на одно бюджетное место; значение <1 означает, что "
+            f"серьёзных заявителей меньше, чем мест.\n"
+            f"- **Доля целевой квоты от бюджета** — сколько бюджетных мест программы "
+            f"отдано под целевой приём (не общий конкурс). Не входит в желанность (M4), "
+            f"но искажает интуицию о «сколько на самом деле шансов» — держать перед глазами."
+        )
+
+    detailed_table = filtered_main[filtered_main["educationProgramId"].isin(selected_detail)][
+        [
+            "display_name", "filial", "n_unique_applicants_total",
+            "n_serious_budget_family", "n_serious_commercial",
+            "competition_ratio_budget_family", "demand_pressure_budget_family",
+            "target_quota_share_of_budget",
+        ]
+    ].copy()
+    for c in ("competition_ratio_budget_family", "demand_pressure_budget_family", "target_quota_share_of_budget"):
+        detailed_table[c] = detailed_table[c].round(2)
+    detailed_table = detailed_table.rename(columns={
+        "display_name": "Программа", "filial": "Филиал",
+        "n_unique_applicants_total": "Уникальных абитуриентов",
+        "n_serious_budget_family": serious_label_budget,
+        "n_serious_commercial": serious_label_commercial,
+        "competition_ratio_budget_family": "Конкурс на место (бюджет)",
+        "demand_pressure_budget_family": "Приоритетных заявителей на место",
+        "target_quota_share_of_budget": "Доля целевой квоты от бюджета",
+    })
+    st.dataframe(
+        detailed_table.sort_values("Уникальных абитуриентов", ascending=False),
+        width="stretch", hide_index=True, height=400,
+    )
+
+    st.subheader("Рейтинг желанности программ")
+    st.caption(
+        "Насколько часто абитуриенты ставят программу первым приоритетом — бюджет+квоты "
+        "и платное берутся ВМЕСТЕ (не только бюджет), взвешенно по тому, насколько "
+        "уверенно посчитан каждый канал. Целевая квота не участвует (её приоритет "
+        "несопоставим с остальной очередью, см. врезку выше)."
+    )
+    st.caption(
+        "⚠️ **Нишевые чисто платные программы часто оказываются наверху — это не "
+        "ошибка.** Там нет бесплатной альтернативы, которая привлекала бы "
+        "малозаинтересованных «на всякий случай» абитуриентов — подаются только "
+        "по-настоящему замотивированные, поэтому доля «поставили первым приоритетом» "
+        "у них структурно выше. Это законный сигнал, просто другой природы, чем у "
+        "массовых конкурентных программ — не то же самое, что «желаннее для всех»."
+    )
+    with st.expander("Подробнее о метрике"):
+        st.markdown(
+            "Простая доля «поставили первым приоритетом» ненадёжна для программ с малым "
+            "числом заявок. Поэтому оценка каждой программы подтягивается к среднему по "
+            "рынку значению тем сильнее, чем меньше у неё данных (метод — эмпирический Байес), "
+            "отдельно для бюджетной очереди и для платной."
+        )
+        st.latex(r"\text{Желанность}_{канал} = \dfrac{\text{cnt}_{p1} + k \cdot p_0}{n + k}")
+        st.markdown(
+            f"где `cnt_p1` — число заявителей с приоритетом №1, `n` — всего заявителей "
+            f"канала у программы. Бюджет: `p0` ≈ {meta['M4_p0_budget']:.3f}, "
+            f"`k` ≈ {meta['M4_k_budget']:.2f}. Платное: `p0` ≈ {meta['M4_p0_commercial']:.3f}, "
+            f"`k` ≈ {meta['M4_k_commercial']:.2f}."
+        )
+        st.markdown(
+            "Два канала объединяются во взвешенное среднее — вес каждого обратно "
+            "пропорционален его апостериорной неопределённости (чем больше данных, тем "
+            "увереннее оценка и больше вес), это стандартный статистический приём "
+            "(взвешивание по обратной дисперсии), не произвольно подобранная пропорция. "
+            f"Это оправдано на данных: желанность по бюджету и по платному, посчитанные "
+            f"полностью независимо, коррелируют на **{meta['M4_corr_budget_commercial']:.2f}** "
+            f"по всем программам с данными в обоих каналах — то есть это две оценки одной "
+            f"и той же величины, а не два разных явления."
+        )
+    filtered_ranked = ranked[ranked["filial"].isin(selected_filials)]
+    ranked_display = filtered_ranked[
+        ["desirability_rank", "display_name", "filial", "n_p1_budget_family",
+         "n_applications_budget_family", "desirability_budget", "desirability_commercial",
+         "desirability_combined", "target_quota_share_of_budget"]
+    ].copy()
+    for c in ("desirability_budget", "desirability_commercial", "desirability_combined"):
+        ranked_display[c] = ranked_display[c].round(3)
+    ranked_display["target_quota_share_of_budget"] = ranked_display["target_quota_share_of_budget"].round(2)
+    ranked_display = ranked_display.rename(columns={
+        "desirability_rank": "Ранг", "display_name": "Программа", "filial": "Филиал",
+        "n_p1_budget_family": "Заявок с приоритетом №1 (бюджет)",
+        "n_applications_budget_family": "Всего заявок (бюджет+квоты)",
+        "desirability_budget": "Желанность (бюджет)",
+        "desirability_commercial": "Желанность (платное)",
+        "desirability_combined": "Желанность (общая)",
+        "target_quota_share_of_budget": "Доля целевой квоты от бюджета",
+    })
+    st.dataframe(
+        ranked_display,
+        width="stretch", hide_index=True, height=400,
+        column_config={
+            "Желанность (бюджет)": st.column_config.NumberColumn(format="%.3f"),
+            "Желанность (платное)": st.column_config.NumberColumn(format="%.3f"),
+            "Желанность (общая)": st.column_config.NumberColumn(format="%.3f"),
+        },
+    )
+
+    filtered_no_places = no_places[no_places["filial"].isin(selected_filials)]
+    no_places_display = filtered_no_places[["display_name", "filial"]].rename(
+        columns={"display_name": "Программа", "filial": "Филиал"}
+    )
+    with st.expander(f"Программы без бюджетных мест, вне рейтинга ({len(no_places_display)})"):
+        st.dataframe(no_places_display, width="stretch", hide_index=True)
+        st.caption(
+            "Часть этого списка — программы заочной/очно-заочной формы (например, "
+            "«Программная инженерия (ОЗ)»): КЦП-таблицы охватывают только очный набор, "
+            "отсутствие места приёма здесь — не ошибка сопоставления."
+        )
+
+    st.divider()
+    program_ids_here = sorted(filtered_main["educationProgramId"].unique(), key=lambda i: id_to_name.get(i, ""))
+    selected_id = st.selectbox(
+        "Программа — распределение приоритетов и пересечения",
+        with_priority_first(program_ids_here, id_to_name),
+        format_func=lambda i: star_label(i, id_to_name),
+    )
+
+    st.markdown("**Распределение приоритетов**")
+    dist = priority_dist[priority_dist["educationProgramId"] == selected_id].set_index("priority")
+    if len(dist):
+        dist_display = dist[["n_budget_family", "n_commercial", "n_target_quota"]].rename(columns={
+            f"n_{ch}": label for ch, label in CHANNEL_LABELS.items()
+        })
+        st.bar_chart(dist_display)
+    else:
+        st.info("Нет заявок с указанным приоритетом по этой программе.")
+
+    st.markdown("**Топ-10 пересечений (общие абитуриенты)**")
+    channel_choice = channel_radio("Канал", key="inter_channel")
+    matrix = intersections[channel_choice]
+    selected_name = id_to_matrix_label.get(selected_id, selected_id)
+    if selected_name in matrix.index:
+        row = matrix.loc[selected_name]
+        if isinstance(row, pd.DataFrame):
+            # Подстраховка: даже глобально уникальный matrix_label не спасает,
+            # если построение матрицы (program_intersections) когда-то
+            # регрессирует — лучше явный, понятный лог, чем TypeError у
+            # sort_values() без объяснения причины.
+            row = row.iloc[0]
+        row = row.drop(selected_name, errors="ignore")
+        row = row[row > 0].sort_values(ascending=False).head(10)
+        if len(row):
+            chart_data = row.rename("count").rename_axis("program").reset_index()
+            chart = (
+                alt.Chart(chart_data)
+                .mark_bar()
+                .encode(
+                    x=alt.X("count:Q", title="Общих абитуриентов"),
+                    y=alt.Y("program:N", sort="-x", title=None, axis=alt.Axis(labelLimit=400)),
+                )
+                .properties(height=32 * len(chart_data) + 20)
+            )
+            st.altair_chart(chart, width="stretch")
+        else:
+            st.info("Нет пересечений с другими программами по этому каналу.")
+    else:
+        st.info(f"У программы нет заявок канала «{CHANNEL_LABELS[channel_choice]}» — пересечения не определены.")
+
+    st.markdown("**Абитуриенты этой программы**")
+    bf_sub = budget_family[budget_family["educationProgramId"] == selected_id][
+        ["idEpgu", "priority", "participantStatus", "is_active", "score"]
+    ].rename(columns={"priority": "Приоритет (бюджет)", "participantStatus": "Статус (бюджет)",
+                       "score": "Баллы (бюджет)"})
+    comm_sub = df[(df["educationProgramId"] == selected_id) & (df["placeTypeName"] == "С оплатой обучения")][
+        ["idEpgu", "priority", "participantStatus", "score"]
+    ].rename(columns={"priority": "Приоритет (платное)", "participantStatus": "Статус (платное)",
+                       "score": "Баллы (платное)"})
+    tq_sub = df[(df["educationProgramId"] == selected_id) & (df["placeTypeName"] == "Целевая квота")][
+        ["idEpgu", "priority", "participantStatus", "score"]
+    ].rename(columns={"priority": "Приоритет (целевая квота)", "participantStatus": "Статус (целевая квота)",
+                       "score": "Баллы (целевая квота)"})
+
+    applicants_table = pd.merge(
+        bf_sub.drop(columns=["is_active"]), comm_sub, on="idEpgu", how="outer"
+    ).merge(tq_sub, on="idEpgu", how="outer")
+
+    if len(applicants_table):
+        applicants_table = applicants_table.rename(columns={"idEpgu": "ID (Госуслуги)"})
+        for col in ("Приоритет (бюджет)", "Приоритет (платное)", "Приоритет (целевая квота)"):
+            applicants_table[col] = applicants_table[col].astype("Int64")
+        applicants_table = applicants_table.sort_values(
+            ["Приоритет (бюджет)", "Приоритет (платное)"], na_position="last"
+        )
+        st.dataframe(applicants_table, width="stretch", hide_index=True, height=400)
+        st.caption(
+            f"Всего уникальных абитуриентов по этой программе: "
+            f"{applicants_table['ID (Госуслуги)'].nunique()}. Пусто — не подавался этим каналом. "
+            f"«Приоритет (бюджет)» — уже сведён к одному значению на человека по правилу "
+            f"схлопывания бюджетной семьи (см. docs/METRICS.md §0)."
+        )
+    else:
+        st.info("Нет заявок по этой программе.")
+
+# -------------------------------------------------------------- Сравнить программы
+with tab_compare:
+    st.caption(
+        "Сравните две программы рядом — как карточки товаров на маркетплейсе: "
+        "места, конкурс, желанность, профиль приоритетов."
+    )
+
+    options_compare = with_priority_first(all_ids, id_to_name)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        program_a = st.selectbox(
+            "Программа 1", options_compare, index=None,
+            format_func=lambda i: star_label(i, id_to_name),
+            placeholder="Выберите программу", key="compare_program_a",
+        )
+    with col_b:
+        program_b = st.selectbox(
+            "Программа 2", options_compare, index=None,
+            format_func=lambda i: star_label(i, id_to_name),
+            placeholder="Выберите программу", key="compare_program_b",
+        )
+
+    if program_a is None or program_b is None:
+        st.info("Выберите обе программы для сравнения.")
+    elif program_a == program_b:
+        st.warning("Выберите две разные программы.")
+    else:
+        selected_compare = [program_a, program_b]
+
+        cmp = main[main["educationProgramId"].isin(selected_compare)].merge(
+            ranked[["educationProgramId", "desirability_rank"]],
+            on="educationProgramId", how="left",
+        ).set_index("educationProgramId").loc[selected_compare]
+        cmp.index = [id_to_name.get(i, i) for i in cmp.index]
+
+        students_a = set(df.loc[df["educationProgramId"] == program_a, "idEpgu"])
+        students_b = set(df.loc[df["educationProgramId"] == program_b, "idEpgu"])
+        n_common = len(students_a & students_b)
+
+        labels = [id_to_name.get(program_a, program_a), id_to_name.get(program_b, program_b)]
+        rows = {
+            "Филиал": cmp["filial"],
+            "Бюджетных мест": cmp["budget_places"],
+            "  из них целевая квота": cmp["target_quota_places"],
+            "Платных мест": cmp["commercial_places"],
+            "Заявок на бюджет (+квоты)": cmp["n_applications_budget_family"],
+            "Заявок на платное": cmp["n_applications_commercial"],
+            "Заявок на целевую квоту": cmp["n_applications_target_quota"],
+            "Уникальных абитуриентов": cmp["n_unique_applicants_total"],
+            "Общие уникальные абитуриенты": pd.Series(n_common, index=cmp.index),
+            serious_label_budget: cmp["n_serious_budget_family"],
+            serious_label_commercial: cmp["n_serious_commercial"],
+            "Конкурс на место (бюджет)": cmp["competition_ratio_budget_family"].round(2),
+            "Приоритетных заявителей на место": cmp["demand_pressure_budget_family"].round(2),
+            "Желанность (бюджет)": cmp["desirability_budget"].round(3),
+            "Желанность (платное)": cmp["desirability_commercial"].round(3),
+            "Желанность (общая)": cmp["desirability_combined"].round(3),
+            "Ранг желанности": cmp["desirability_rank"],
+        }
+        compare_table = pd.DataFrame(rows).T
+        compare_table.columns = labels
+        compare_table = compare_table.fillna("—")
+        st.dataframe(compare_table, width="stretch")
+        st.caption(
+            "«—» значит «не определено» (нет бюджетных мест или программа вне рейтинга "
+            "желанности) — не путать с нулевым интересом. «Общие уникальные абитуриенты» "
+            "— одно число на пару программ по всем трём каналам вместе."
+        )
+
+        st.divider()
+        st.markdown("**Профиль приоритетов**")
+        profile_channel = channel_radio("Канал", key="compare_profile_channel")
+        value_col = {"budget_family": "n_budget_family", "commercial": "n_commercial",
+                     "target_quota": "n_target_quota"}[profile_channel]
+        profile_data = priority_dist[priority_dist["educationProgramId"].isin(selected_compare)][
+            ["educationProgramId", "priority", value_col]
+        ].copy()
+        profile_data["Программа"] = profile_data["educationProgramId"].map(id_to_name)
+        if len(profile_data):
+            profile_chart = (
+                alt.Chart(profile_data)
+                .mark_bar()
+                .encode(
+                    x=alt.X("priority:O", title="Приоритет"),
+                    y=alt.Y(f"{value_col}:Q", title="Заявителей"),
+                )
+                .properties(width=340, height=400)
+                .facet(column=alt.Column("Программа:N", title=None, sort=labels))
+            )
+            st.altair_chart(profile_chart, width="stretch")
+        else:
+            st.info(f"Нет заявок канала «{CHANNEL_LABELS[profile_channel]}» ни у одной из выбранных программ.")
+
+# --------------------------------------------------------------- По абитуриенту
+with tab_applicant:
+    st.caption("Найдите абитуриента по ID (числовой код, соответствует Госуслугам), чтобы увидеть все его заявки.")
+    query = st.text_input("ID абитуриента (idEpgu)")
+
+    if query:
+        try:
+            query_value = str(int(query))
+        except ValueError:
+            st.error("Нужно ввести число.")
+        else:
+            student_rows = df[df["idEpgu"] == query_value]
+            if student_rows.empty:
+                st.warning("Абитуриент с таким ID не найден в текущем срезе.")
+            else:
+                student_rows = student_rows.copy()
+                student_rows["display_name"] = student_rows["educationProgramId"].map(id_to_name)
+                display_cols = ["display_name", "filial", "placeTypeName", "priority",
+                                 "participantStatus", "score"]
+                student_display = student_rows[display_cols].sort_values(
+                    ["placeTypeName", "priority"]
+                ).rename(columns={
+                    "display_name": "Программа", "filial": "Филиал",
+                    "placeTypeName": "Канал", "priority": "Приоритет",
+                    "participantStatus": "Статус", "score": "Баллы",
+                })
+                st.dataframe(student_display, width="stretch", hide_index=True)
+                st.caption(f"Всего заявок у абитуриента: {len(student_rows)} "
+                           f"на {student_rows['educationProgramId'].nunique()} программ(-ы).")
