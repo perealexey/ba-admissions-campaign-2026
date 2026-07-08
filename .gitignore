@@ -21,6 +21,10 @@ docs/*.html
 # Локальные dev-инструменты (Claude Code preview), не часть проекта
 .claude/
 
+# Рабочая память для следующего чата с Claude Code — не документация проекта,
+# не для репозитория.
+docs/CONTEXT_FOR_FUTURE.md
+
 # Секреты (пароль дашборда, ключ сервисного аккаунта Google — когда появятся)
 .streamlit/secrets.toml
 .streamlit/*.json
