@@ -284,6 +284,7 @@ id_to_matrix_label = dict(zip(main["educationProgramId"], main["matrix_label"]))
 snapshot_date_short = meta["snapshot_date"].replace("-", ".")
 
 st.title("Приёмная кампания ВШЭ — бакалавриат")
+st.caption("Проект подготовлен Переясловым А.Д., ст. преподавателем, менеджером Института медиа")
 st.caption(
     f'<span style="font-size:18px;">Данные актуальны на момент {snapshot_date_short} · '
     f'Программ: {meta["n_programs"]} · Порог «серьёзной» заявки: priority ≤ {meta["K_SERIOUS"]}</span>',
