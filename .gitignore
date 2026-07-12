@@ -2,6 +2,7 @@
 # агрегировано) и технические артефакты сбора — регенерируются
 # collector_bak.py локально, не для публичного репозитория.
 bak_data/
+bak_data_backup_*/
 har/
 cowork_output/
 pk.hse.ru*.html
