@@ -676,7 +676,7 @@ with tab_program:
 with tab_compare:
     st.caption(
         "Сравните две программы рядом — как карточки товаров на маркетплейсе: "
-        "места, конкурс, интерес, профиль приоритетов."
+        "места, конкурс, интерес, профиль приоритетов и общие абитуриенты."
     )
 
     options_compare = with_priority_first(all_ids, id_to_name)
@@ -740,6 +740,43 @@ with tab_compare:
             "бюджетных метрик) — не путать с нулевым интересом. «Общие уникальные "
             "абитуриенты» — одно число на пару программ по всем трём видам конкурса вместе."
         )
+
+        st.divider()
+        st.markdown("**Общие абитуриенты — их приоритеты по обеим программам**")
+        common_ids = students_a & students_b
+        if common_ids:
+            # Приоритет на программу = минимум (самый сильный) по всем спискам
+            # абитуриента: бюджет, платное и целевая квота нумеруют приоритеты
+            # независимо, поэтому берём наименьший номер из всех, что человек
+            # присвоил этой программе.
+            prio_a = (
+                df[(df["educationProgramId"] == program_a) & (df["idEpgu"].isin(common_ids))]
+                .groupby("idEpgu")["priority"].min()
+            )
+            prio_b = (
+                df[(df["educationProgramId"] == program_b) & (df["idEpgu"].isin(common_ids))]
+                .groupby("idEpgu")["priority"].min()
+            )
+            # Внутренние ключи prio_a/prio_b (а не финальные заголовки) — чтобы
+            # sort_values не сломался, если у двух программ разных филиалов
+            # совпадёт отображаемое имя (например «Медиакоммуникации» Москва/СПб).
+            common_table = pd.DataFrame(
+                {"prio_a": prio_a, "prio_b": prio_b}
+            ).sort_values(["prio_a", "prio_b"], na_position="last").astype("Int64")
+            common_table.index.name = "ID (Госуслуги)"
+            common_table = common_table.reset_index()
+            common_table.columns = [
+                "ID (Госуслуги)", f"Приоритет — {labels[0]}", f"Приоритет — {labels[1]}",
+            ]
+            st.dataframe(common_table, width="stretch", hide_index=True)
+            st.caption(
+                f"{len(common_table)} абитуриентов подали заявки на обе программы. "
+                "«Приоритет» — самый сильный (наименьший номер), присвоенный программе; "
+                "бюджет, платное и целевая квота нумеруют приоритеты независимо, поэтому "
+                "берётся минимум по всем его спискам."
+            )
+        else:
+            st.info("У этих двух программ нет общих абитуриентов.")
 
         st.divider()
         st.markdown("**Профиль приоритетов**")
