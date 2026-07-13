@@ -43,6 +43,11 @@ from googleapiclient.http import MediaIoBaseDownload
 # только paint — безопасно.
 PAGE_BACKGROUND_COLOR = "#2657EB"
 TEXT_ON_BACKGROUND = "#FFFFFF"
+# Тот же светло-голубой, что secondaryBackgroundColor в .streamlit/config.toml —
+# используется для выпадающих блоков (st.expander), чтобы они не сливались с
+# синим фоном страницы, как поле выбора программы (st.selectbox уже берёт этот
+# цвет из темы автоматически, st.expander — нет, красим вручную).
+WIDGET_BACKGROUND_COLOR = "#C7E4FF"
 
 # Приоритетные программы (звёздочка везде в списках) — очные программы
 # Москвы по направлениям Медиакоммуникации/Журналистика/Реклама/Кино/Актёр.
@@ -170,7 +175,6 @@ def load_metrics():
         },
     )
     ranked = read_drive_csv("campaign_metrics_m4_desirability_ranked_bak.csv")
-    no_places = read_drive_csv("campaign_metrics_no_budget_places_bak.csv")
     files = list_drive_files()
     meta = json.loads(download_drive_file(files["campaign_metrics_meta_bak.json"]).decode("utf-8"))
     priority_dist = read_drive_csv("metric_priority_distribution_bak.csv")
@@ -179,7 +183,7 @@ def load_metrics():
         ch: read_drive_csv(f"metric_program_intersections_bak_{ch}.csv", index_col=0)
         for ch in CHANNEL_LABELS
     }
-    return main, ranked, no_places, meta, priority_dist, m9, intersections
+    return main, ranked, meta, priority_dist, m9, intersections
 
 
 # --------------------------------------------------------------------------
@@ -243,6 +247,19 @@ def inject_theme():
         div[data-baseweb="tab-highlight"] {{
             height: 4px;
         }}
+        [data-testid="stExpander"] summary {{
+            background-color: {WIDGET_BACKGROUND_COLOR};
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
+        }}
+        [data-testid="stExpander"] summary:hover {{
+            background-color: {WIDGET_BACKGROUND_COLOR};
+        }}
+        [data-testid="stExpander"] summary p,
+        [data-testid="stExpander"] summary span,
+        [data-testid="stExpander"] summary [data-testid="stIconMaterial"] {{
+            color: #000000 !important;
+        }}
         .block-container {{
             background: rgba(255, 255, 255, 0.04);
             border-radius: 12px;
@@ -266,7 +283,7 @@ if not check_password():
 
 df = load_long_table()
 budget_family = load_budget_family()
-main, ranked, no_places, meta, priority_dist, m9, intersections = load_metrics()
+main, ranked, meta, priority_dist, m9, intersections = load_metrics()
 
 # display_name != educationProgram для программ-«близнецов» (одно имя+филиал,
 # разные educationProgramId — см. docs/FINDINGS.md, 10 подтверждённых случаев,
@@ -457,18 +474,6 @@ with tab_program:
         },
     )
 
-    filtered_no_places = no_places[no_places["filial"].isin(selected_filials)]
-    no_places_display = filtered_no_places[["display_name", "filial"]].rename(
-        columns={"display_name": "Программа", "filial": "Филиал"}
-    )
-    with st.expander(f"Программы без бюджетных мест, вне рейтинга ({len(no_places_display)})"):
-        st.dataframe(no_places_display, width="stretch", hide_index=True)
-        st.caption(
-            "Часть этого списка — программы заочной/очно-заочной формы (например, "
-            "«Программная инженерия (ОЗ)»): КЦП-таблицы охватывают только очный набор, "
-            "отсутствие места приёма здесь — не ошибка сопоставления."
-        )
-
     st.divider()
     program_ids_here = sorted(filtered_main["educationProgramId"].unique(), key=lambda i: id_to_name.get(i, ""))
     selected_id = st.selectbox(
@@ -522,11 +527,11 @@ with tab_program:
     bf_sub = budget_family[budget_family["educationProgramId"] == selected_id][
         ["idEpgu", "priority", "participantStatus", "is_active", "score"]
     ].rename(columns={"priority": "Приоритет (бюджет)", "participantStatus": "Статус (бюджет)",
-                       "score": "Баллы (бюджет)"})
+                       "score": "score_budget"})
     comm_sub = df[(df["educationProgramId"] == selected_id) & (df["placeTypeName"] == "С оплатой обучения")][
         ["idEpgu", "priority", "participantStatus", "score"]
     ].rename(columns={"priority": "Приоритет (платное)", "participantStatus": "Статус (платное)",
-                       "score": "Баллы (платное)"})
+                       "score": "score_commercial"})
     tq_sub = df[(df["educationProgramId"] == selected_id) & (df["placeTypeName"] == "Целевая квота")][
         ["idEpgu", "priority", "participantStatus", "score"]
     ].rename(columns={"priority": "Приоритет (целевая квота)", "participantStatus": "Статус (целевая квота)",
@@ -537,7 +542,18 @@ with tab_program:
     ).merge(tq_sub, on="idEpgu", how="outer")
 
     if len(applicants_table):
+        # score_budget/score_commercial — один и тот же балл абитуриента (не зависит от
+        # канала подачи), дублируются только из-за раздельного сбора очередей;
+        # схлопываем в одну колонку вместо повторного показа.
+        applicants_table["Баллы"] = applicants_table["score_budget"].combine_first(
+            applicants_table["score_commercial"]
+        )
+        applicants_table = applicants_table.drop(columns=["score_budget", "score_commercial"])
         applicants_table = applicants_table.rename(columns={"idEpgu": "ID (Госуслуги)"})
+        cols = applicants_table.columns.tolist()
+        cols.remove("Баллы")
+        cols.insert(cols.index("ID (Госуслуги)") + 1, "Баллы")
+        applicants_table = applicants_table[cols]
         for col in ("Приоритет (бюджет)", "Приоритет (платное)", "Приоритет (целевая квота)"):
             applicants_table[col] = applicants_table[col].astype("Int64")
         applicants_table = applicants_table.sort_values(
@@ -618,9 +634,9 @@ with tab_compare:
         compare_table = compare_table.fillna("—")
         st.dataframe(compare_table, width="stretch")
         st.caption(
-            "«—» значит «не определено» (нет бюджетных мест или программа вне рейтинга "
-            "желанности) — не путать с нулевым интересом. «Общие уникальные абитуриенты» "
-            "— одно число на пару программ по всем трём каналам вместе."
+            "«—» значит «не определено» (нет бюджетных мест у программы, поэтому нет "
+            "бюджетных метрик) — не путать с нулевым интересом. «Общие уникальные "
+            "абитуриенты» — одно число на пару программ по всем трём каналам вместе."
         )
 
         st.divider()
