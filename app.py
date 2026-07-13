@@ -41,13 +41,21 @@ from googleapiclient.http import MediaIoBaseDownload
 # непредсказуемо по вьюпорту (растягивало по горизонтали/сжимало по
 # вертикали). Чистый `background-color` без `height` не трогает layout,
 # только paint — безопасно.
-PAGE_BACKGROUND_COLOR = "#2657EB"
+PAGE_BACKGROUND_COLOR = "#406BED"  # на один оттенок светлее прежнего #2657EB
 TEXT_ON_BACKGROUND = "#FFFFFF"
 # Тот же светло-голубой, что secondaryBackgroundColor в .streamlit/config.toml —
 # используется для выпадающих блоков (st.expander), чтобы они не сливались с
 # синим фоном страницы, как поле выбора программы (st.selectbox уже берёт этот
 # цвет из темы автоматически, st.expander — нет, красим вручную).
 WIDGET_BACKGROUND_COLOR = "#C7E4FF"
+# Фон для st.info-врезок (несколько оттенков светлее PAGE_BACKGROUND_COLOR) —
+# без этого их скруглённая рамка почти не отличалась от фона страницы.
+# Именно светлее, а не белее как WIDGET_BACKGROUND_COLOR: контраст белого
+# текста с фоном страницы и так близок к порогу WCAG AA (4.5:1) — светлее
+# уже начинает падать ниже нормы для обычного текста, поэтому лёгкий сдвиг
+# компенсирован дополнительной светлой левой полосой-акцентом (см. CSS),
+# а не только разницей в заливке.
+INFO_BOX_BACKGROUND_COLOR = "#4A72EE"
 
 # Приоритетные программы (звёздочка везде в списках) — очные программы
 # Москвы по направлениям Медиакоммуникации/Журналистика/Реклама/Кино/Актёр.
@@ -232,6 +240,7 @@ def inject_theme():
         }}
         [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {{
             color: {TEXT_ON_BACKGROUND};
+            font-size: calc(1em + 2px);
         }}
         div[data-baseweb="tab-list"] {{
             gap: 8px;
@@ -241,7 +250,7 @@ def inject_theme():
             padding: 0 28px;
         }}
         div[data-baseweb="tab-list"] button[data-baseweb="tab"] p {{
-            font-size: 20px;
+            font-size: 22px;
             font-weight: 700;
         }}
         div[data-baseweb="tab-highlight"] {{
@@ -259,6 +268,40 @@ def inject_theme():
         [data-testid="stExpander"] summary span,
         [data-testid="stExpander"] summary [data-testid="stIconMaterial"] {{
             color: #000000 !important;
+        }}
+        /* st.info-врезки ("Зачем эта страница", "Как пользоваться", "Три вида
+        конкурса" и служебные st.info по ходу дашборда) — без этого их
+        скруглённая рамка почти не отличалась от фона страницы. */
+        [data-testid="stAlertContainer"] {{
+            background-color: {INFO_BOX_BACKGROUND_COLOR} !important;
+            border-left: 4px solid rgba(255, 255, 255, 0.55);
+            border-radius: 8px;
+        }}
+        [data-testid="stAlertContainer"] p,
+        [data-testid="stAlertContainer"] li,
+        [data-testid="stAlertContainer"] span,
+        [data-testid="stAlertContainer"] strong {{
+            color: #FFFFFF !important;
+        }}
+        /* st.caption по умолчанию рисуется приглушённым (тёмным текстом с
+        уменьшенной непрозрачностью) — на синем фоне это читалось как блёклый
+        серый текст. */
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] p {{
+            color: #FFFFFF !important;
+            opacity: 1 !important;
+        }}
+        /* Единая точка увеличения размера текста (~+2px): stMarkdownContainer —
+        общий внутренний контейнер, через который рендерится текст st.markdown,
+        st.title/header/subheader, st.caption и st.info одновременно — поэтому
+        правило только здесь, а не отдельно на p/span/li, иначе размер удвоился
+        бы у вложенных элементов (caption/alert внутри тоже используют этот же
+        контейнер). */
+        [data-testid="stMarkdownContainer"] {{
+            font-size: calc(1em + 2px);
+        }}
+        [data-testid="stWidgetLabel"] p {{
+            font-size: calc(1em + 2px);
         }}
         .block-container {{
             background: rgba(255, 255, 255, 0.04);
@@ -303,7 +346,7 @@ snapshot_date_short = meta["snapshot_date"].replace("-", ".")
 st.title("Приёмная кампания ВШЭ — бакалавриат")
 st.caption("Проект подготовлен Переясловым А.Д., ст. преподавателем, менеджером Института медиа")
 st.caption(
-    f'<span style="font-size:18px;">Данные актуальны на момент {snapshot_date_short} · '
+    f'<span style="font-size:20px;">Данные актуальны на момент {snapshot_date_short} · '
     f'Программ: {meta["n_programs"]} · Порог «серьёзного» приоритета: ≤ {meta["K_SERIOUS"]}</span>',
     unsafe_allow_html=True,
 )
@@ -318,12 +361,13 @@ st.info(
     "запасным вариантом.",
     icon="📊",
 )
-st.caption(
+st.info(
     "**Как пользоваться.** «Базовая статистика» ниже — это просто число заявлений по "
     "выбранным программам. Дальше три вкладки: «По программе» (подробные показатели и "
     "рейтинг желанности), «Сравнить программы» (две программы бок о бок) и "
     "«По абитуриенту» (все заявки одного человека). Почти у каждого показателя есть "
-    "кнопка «Подробнее» — там формула и пояснение простым языком."
+    "кнопка «Подробнее» — там формула и пояснение простым языком.",
+    icon="🧭",
 )
 
 st.info(
