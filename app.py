@@ -93,6 +93,16 @@ CHANNEL_LABELS = {
     "target_quota": "Целевая квота",
 }
 
+# Сырой placeTypeName из длинной таблицы → канал дашборда. Бюджетная семья
+# (общий конкурс + отдельная квота + особое право) схлопнута в один канал.
+PLACE_TYPE_TO_CHANNEL = {
+    "Бюджетные места": "budget_family",
+    "Отдельная квота": "budget_family",
+    "Квота приема лиц, имеющих особое право": "budget_family",
+    "С оплатой обучения": "commercial",
+    "Целевая квота": "target_quota",
+}
+
 
 # --------------------------------------------------------------------------
 # Google Drive — тот же механизм, что и в магистратуре (summer_campaign_26/app.py)
@@ -745,35 +755,58 @@ with tab_compare:
         st.markdown("**Общие абитуриенты — их приоритеты по обеим программам**")
         common_ids = students_a & students_b
         if common_ids:
-            # Приоритет на программу = минимум (самый сильный) по всем спискам
-            # абитуриента: бюджет, платное и целевая квота нумеруют приоритеты
-            # независимо, поэтому берём наименьший номер из всех, что человек
-            # присвоил этой программе.
-            prio_a = (
-                df[(df["educationProgramId"] == program_a) & (df["idEpgu"].isin(common_ids))]
-                .groupby("idEpgu")["priority"].min()
-            )
-            prio_b = (
-                df[(df["educationProgramId"] == program_b) & (df["idEpgu"].isin(common_ids))]
-                .groupby("idEpgu")["priority"].min()
-            )
-            # Внутренние ключи prio_a/prio_b (а не финальные заголовки) — чтобы
-            # sort_values не сломался, если у двух программ разных филиалов
-            # совпадёт отображаемое имя (например «Медиакоммуникации» Москва/СПб).
-            common_table = pd.DataFrame(
-                {"prio_a": prio_a, "prio_b": prio_b}
-            ).sort_values(["prio_a", "prio_b"], na_position="last").astype("Int64")
+            sub = df[df["idEpgu"].isin(common_ids)].copy()
+            sub["channel"] = sub["placeTypeName"].map(PLACE_TYPE_TO_CHANNEL)
+
+            # Приоритет разнесён по видам конкурса (бюджет+квоты / платное /
+            # целевая квота нумеруются НЕЗАВИСИМО, поэтому один и тот же номер в
+            # разных колонках — это разные очереди). Пусто = не подавался этим
+            # видом. .min() внутри вида — на случай нескольких строк бюджетной
+            # семьи (общий конкурс + отдельная квота + особое право) у одного
+            # человека: берём сильнейший приоритет семьи.
+            def prio_by_channel(pid: str) -> pd.DataFrame:
+                piv = (
+                    sub[sub["educationProgramId"] == pid]
+                    .groupby(["idEpgu", "channel"])["priority"].min()
+                    .unstack("channel")
+                )
+                for ch in ("budget_family", "commercial", "target_quota"):
+                    if ch not in piv.columns:
+                        piv[ch] = pd.NA
+                return piv[["budget_family", "commercial", "target_quota"]]
+
+            pa = prio_by_channel(program_a)
+            pb = prio_by_channel(program_b)
+
+            common_table = pd.DataFrame(index=sorted(common_ids))
+            common_table["a_b"], common_table["a_c"], common_table["a_t"] = pa["budget_family"], pa["commercial"], pa["target_quota"]
+            common_table["b_b"], common_table["b_c"], common_table["b_t"] = pb["budget_family"], pb["commercial"], pb["target_quota"]
+            # Сортировка — по сильнейшему приоритету на программу A, затем B.
+            common_table["_sa"] = common_table[["a_b", "a_c", "a_t"]].min(axis=1)
+            common_table["_sb"] = common_table[["b_b", "b_c", "b_t"]].min(axis=1)
+            common_table = common_table.sort_values(["_sa", "_sb"], na_position="last").drop(columns=["_sa", "_sb"])
+            # Пустой вид конкурса → пустая ячейка. Int64 <NA> в таблице с
+            # MultiIndex-шапкой Streamlit рисует как "None", поэтому переводим
+            # приоритеты в строки с "" вместо NA (порядок строк уже зафиксирован
+            # сортировкой выше — строковый тип на него не влияет).
+            common_table = common_table.astype("Int64")
+            for c in common_table.columns:
+                common_table[c] = common_table[c].map(lambda x: "" if pd.isna(x) else str(int(x)))
             common_table.index.name = "ID (Госуслуги)"
             common_table = common_table.reset_index()
-            common_table.columns = [
-                "ID (Госуслуги)", f"Приоритет — {labels[0]}", f"Приоритет — {labels[1]}",
-            ]
+            # Двухуровневая шапка: программа → вид конкурса (pivot-стиль).
+            common_table.columns = pd.MultiIndex.from_tuples([
+                ("Абитуриент", "ID (Госуслуги)"),
+                (labels[0], "Бюджет (+квоты)"), (labels[0], "Платное"), (labels[0], "Целевая квота"),
+                (labels[1], "Бюджет (+квоты)"), (labels[1], "Платное"), (labels[1], "Целевая квота"),
+            ])
             st.dataframe(common_table, width="stretch", hide_index=True)
             st.caption(
                 f"{len(common_table)} абитуриентов подали заявки на обе программы. "
-                "«Приоритет» — самый сильный (наименьший номер), присвоенный программе; "
-                "бюджет, платное и целевая квота нумеруют приоритеты независимо, поэтому "
-                "берётся минимум по всем его спискам."
+                "Приоритет показан отдельно по видам конкурса (бюджет+квоты / платное / "
+                "целевая квота). Пусто — не подавался этим видом. Нумерация приоритетов "
+                "у каждого вида независимая, поэтому одинаковый номер в разных колонках — "
+                "это разные очереди."
             )
         else:
             st.info("У этих двух программ нет общих абитуриентов.")
