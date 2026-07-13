@@ -213,7 +213,7 @@ def compute_m1_m2_m3(budget_family: pd.DataFrame, commercial: pd.DataFrame,
 
 
 # --------------------------------------------------------------------------
-# 4. M4 — рейтинг желанности (эмпирический Байес), только budget_family, активные
+# 4. M4 — рейтинг интереса (эмпирический Байес), только budget_family, активные
 # --------------------------------------------------------------------------
 
 def compute_m4(budget_family: pd.DataFrame, base: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -242,7 +242,7 @@ def compute_m4(budget_family: pd.DataFrame, base: pd.DataFrame) -> tuple[pd.Data
     per_program["low_data"] = per_program["n"] < MIN_N_FOR_VARIANCE_ESTIMATION
 
     # Апостериорная дисперсия Beta-Binomial модели — нужна как вес при
-    # объединении желанности с другим каналом (см. compute_m4_combined).
+    # объединении интереса с другим каналом (см. compute_m4_combined).
     # a, b — параметры апостериорного Beta(a,b); var(Beta) = ab/((a+b)^2(a+b+1)).
     a = per_program["cnt_p1"] + k * p0
     b = (per_program["n"] - per_program["cnt_p1"]) + k * (1 - p0)
@@ -258,13 +258,13 @@ def compute_m4(budget_family: pd.DataFrame, base: pd.DataFrame) -> tuple[pd.Data
 
 
 def compute_m4_combined(m4_budget: pd.DataFrame, m4_commercial: pd.DataFrame) -> pd.DataFrame:
-    """Объединённая желанность (M4) — бюджет+квоты и платное вместе, через
+    """Объединённый интерес (M4) — бюджет+квоты и платное вместе, через
     inverse-variance weighting (взвешивание по обратной апостериорной
     дисперсии каждого канала, посчитанной в compute_m4). Не произвольный вес —
     прямое следствие уже существующей Beta-Binomial модели: чем больше данных
     и увереннее оценка в канале, тем больше его вклад.
 
-    Оправдано эмпирически: корреляция независимо посчитанных желанностей
+    Оправдано эмпирически: корреляция независимо посчитанного интереса
     (бюджет vs платное) на срезе 2026-07-08 — 0.94 по всем 121 программе с
     данными в обоих каналах (проверено в сессии, см. чат/docs/FINDINGS.md) —
     это ДВЕ ОЦЕНКИ ОДНОЙ И ТОЙ ЖЕ величины с разным шумом, не два разных
@@ -274,7 +274,7 @@ def compute_m4_combined(m4_budget: pd.DataFrame, m4_commercial: pd.DataFrame) ->
 
     Если канала нет (программа целиком без бюджетных мест или целиком без
     платных) — его вес естественно обнуляется (var=NaN -> 1/var=0), и
-    итоговая оценка гладко превращается в желанность оставшегося канала —
+    итоговая оценка гладко превращается в интерес оставшегося канала —
     не требует отдельного случая "нет данных" в коде."""
     b = m4_budget[["educationProgramId", "desirability", "posterior_var"]].rename(
         columns={"desirability": "desirability_budget", "posterior_var": "var_budget"})
@@ -529,8 +529,8 @@ def main():
         m4_combined, on="educationProgramId", how="left",
     )
 
-    # Витрина желанности теперь включает ЛЮБУЮ программу, для которой
-    # желанность определена хоть в одном канале (бюджет и/или платное) — не
+    # Витрина интереса теперь включает ЛЮБУЮ программу, для которой
+    # интерес определён хоть в одном канале (бюджет и/или платное) — не
     # только программы с бюджетными местами. Раньше чисто платные программы
     # молча исключались из рейтинга; desirability_combined через
     # inverse-variance weighting корректно закрывает этот пробел (см.
@@ -540,7 +540,7 @@ def main():
     showcase = showcase.sort_values("desirability_combined", ascending=False)
     showcase["desirability_rank"] = range(1, len(showcase) + 1)
     # no_budget_places по-прежнему только про M5/M6 (нужны КЦП с реальными
-    # бюджетными местами) — про желанность (M4) эти программы больше не
+    # бюджетными местами) — про интерес (M4) эти программы больше не
     # "вне рейтинга", если у них есть хоть какие-то заявки на платное.
     no_places_list = main_table[main_table["no_budget_places"]][
         ["educationProgramId", "educationProgram", "filial", "trainingDirectionName", "display_name"]
@@ -557,11 +557,11 @@ def main():
               "desirability_combined", "low_data", "target_quota_share_of_budget"]].to_csv(
         showcase_path, index=False, encoding="utf-8-sig"
     )
-    print(f"(б) Витрина объединённой желанности (бюджет+квоты И платное) -> {showcase_path} ({len(showcase)} строк)")
+    print(f"(б) Витрина объединённого интереса (бюджет+квоты И платное) -> {showcase_path} ({len(showcase)} строк)")
 
     no_places_path = args.out_dir / "campaign_metrics_no_budget_places_bak.csv"
     no_places_list.to_csv(no_places_path, index=False, encoding="utf-8-sig")
-    print(f"    Без бюджетных мест (вне M5/M6, но не вне рейтинга желанности) -> {no_places_path} ({len(no_places_list)} программ)")
+    print(f"    Без бюджетных мест (вне M5/M6, но не вне рейтинга интереса) -> {no_places_path} ({len(no_places_list)} программ)")
 
     m9_path = args.out_dir / "campaign_metrics_m9_diagnostic_bak.csv"
     m9.to_csv(m9_path, index=False, encoding="utf-8-sig")

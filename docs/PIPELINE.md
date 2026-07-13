@@ -95,8 +95,8 @@ python3 scripts/parse_supply_bak.py docs/ -o data/
 **Скрипт**: [`scripts/campaign_metrics_bak.py`](../scripts/campaign_metrics_bak.py)
 
 Читает `bak_data/` (сырые заявки) + `data/supply_bak_raw.csv` (КЦП), считает
-M1–M9 (три канала — бюджетная семья/платное/целевая квота, объединённая
-желанность через inverse-variance weighting). Полное описание — в
+M1–M9 (три канала — бюджетная семья/платное/целевая квота, объединённый
+интерес через inverse-variance weighting). Полное описание — в
 [`METRICS.md`](METRICS.md).
 
 ```bash
@@ -173,7 +173,7 @@ python3 scripts/sync_to_drive_bak.py
 
 ## Статус на момент написания
 
-Сбор, метрики (M1–M9 с объединённой желанностью), дашборд и первый деплой на
+Сбор, метрики (M1–M9 с объединённым интересом), дашборд и первый деплой на
 Streamlit Community Cloud пройдены. Данные читаются из приватной папки Google
 Drive (не из репозитория). Целевая квота и программы-близнецы разобраны и
 учтены — см. `FINDINGS.md`.
