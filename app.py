@@ -672,6 +672,19 @@ with tab_program:
         applicants_table = applicants_table.sort_values(
             ["Приоритет (бюджет)", "Приоритет (платное)"], na_position="last"
         )
+        # ID — числовой код, пропусков не бывает; настоящий int для правильного
+        # выравнивания (был object/строка — тянулся как есть из idEpgu).
+        applicants_table["ID (Госуслуги)"] = applicants_table["ID (Госуслуги)"].astype("int64")
+        # Приоритеты/баллы могут отсутствовать (подавался не всеми видами
+        # конкурса) — порядок строк уже зафиксирован сортировкой выше по Int64,
+        # но для ПОКАЗА переводим в строку с "" вместо NA: в этой версии
+        # Streamlit (1.50.0) числовая колонка с пропуском рисует пропуск
+        # буквально текстом "None", а не пустой ячейкой (проверено эмпирически
+        # на синтетических данных и на этой же таблице) — только строка с ""
+        # рендерится пустой корректно.
+        for col in ("Приоритет (бюджет)", "Приоритет (платное)", "Приоритет (целевая квота)",
+                    "Баллы", "Баллы (целевая квота)"):
+            applicants_table[col] = applicants_table[col].map(lambda x: "" if pd.isna(x) else str(int(x)))
         st.dataframe(applicants_table, width="stretch", hide_index=True, height=400)
         st.caption(
             f"Всего уникальных абитуриентов по этой программе: "
@@ -785,8 +798,10 @@ with tab_compare:
             common_table["_sa"] = common_table[["a_b", "a_c", "a_t"]].min(axis=1)
             common_table["_sb"] = common_table[["b_b", "b_c", "b_t"]].min(axis=1)
             common_table = common_table.sort_values(["_sa", "_sb"], na_position="last").drop(columns=["_sa", "_sb"])
-            # Пустой вид конкурса → пустая ячейка. Int64 <NA> в таблице с
-            # MultiIndex-шапкой Streamlit рисует как "None", поэтому переводим
+            # Пустой вид конкурса → пустая ячейка. В этой версии Streamlit
+            # (1.50.0) числовая колонка (Int64 ИЛИ float, с MultiIndex-шапкой
+            # или без неё — проверено эмпирически на синтетике) рисует пропуск
+            # буквально текстом "None", а не пустой ячейкой, поэтому переводим
             # приоритеты в строки с "" вместо NA (порядок строк уже зафиксирован
             # сортировкой выше — строковый тип на него не влияет).
             common_table = common_table.astype("Int64")
@@ -794,6 +809,9 @@ with tab_compare:
                 common_table[c] = common_table[c].map(lambda x: "" if pd.isna(x) else str(int(x)))
             common_table.index.name = "ID (Госуслуги)"
             common_table = common_table.reset_index()
+            # ID — числовой код, пропусков не бывает (это и есть общие
+            # абитуриенты); настоящий int для правильного выравнивания.
+            common_table["ID (Госуслуги)"] = common_table["ID (Госуслуги)"].astype("int64")
             # Двухуровневая шапка: программа → вид конкурса (pivot-стиль).
             common_table.columns = pd.MultiIndex.from_tuples([
                 ("Абитуриент", "ID (Госуслуги)"),
