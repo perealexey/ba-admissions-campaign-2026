@@ -576,11 +576,13 @@ with tab_program:
         if DEFAULT_PROGRAM_ID in program_options_here
         else 0
     )
+    st.subheader("Программа — распределение приоритетов и пересечения")
     selected_id = st.selectbox(
         "Программа — распределение приоритетов и пересечения",
         program_options_here,
         index=default_index,
         format_func=lambda i: star_label(i, id_to_name),
+        label_visibility="collapsed",
     )
 
     st.markdown("**Распределение приоритетов**")
