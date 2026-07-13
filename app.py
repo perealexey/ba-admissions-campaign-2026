@@ -82,6 +82,11 @@ PRIORITY_PROGRAM_IDS = {
     "a5aa2da4-cbcf-11ec-b808-005056989556": "Стратегия и продюсирование в коммуникациях",
 }
 
+# Программа по умолчанию в селекторе "Программа — распределение приоритетов
+# и пересечения" — решение пользователя (2026-07-13): «Журналистика» (Москва),
+# единственная программа с этим именем (см. PRIORITY_PROGRAM_IDS выше).
+DEFAULT_PROGRAM_ID = "a5aa2da5-cbcf-11ec-b808-005056989556"
+
 CHANNEL_LABELS = {
     "budget_family": "Бюджет (+квоты)",
     "commercial": "Платное",
@@ -562,9 +567,19 @@ with tab_program:
 
     st.divider()
     program_ids_here = sorted(filtered_main["educationProgramId"].unique(), key=lambda i: id_to_name.get(i, ""))
+    program_options_here = with_priority_first(program_ids_here, id_to_name)
+    # По умолчанию — «Журналистика» (Москва), решение пользователя (2026-07-13).
+    # Если фильтр по филиалу её скрыл (программы этого филиала не выбраны),
+    # откатываемся на первую программу списка, а не падаем с ValueError.
+    default_index = (
+        program_options_here.index(DEFAULT_PROGRAM_ID)
+        if DEFAULT_PROGRAM_ID in program_options_here
+        else 0
+    )
     selected_id = st.selectbox(
         "Программа — распределение приоритетов и пересечения",
-        with_priority_first(program_ids_here, id_to_name),
+        program_options_here,
+        index=default_index,
         format_func=lambda i: star_label(i, id_to_name),
     )
 
